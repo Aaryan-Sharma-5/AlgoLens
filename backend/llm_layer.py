@@ -1,32 +1,30 @@
 """LLM layer for AlgoLens (Groq backend).
 
-Two responsibilities, kept as two distinct Groq calls (per the architecture in
-CLAUDE.md):
+Two responsibilities (per the architecture in CLAUDE.md):
 
 1. ``llm_generate`` — ONE blocking, non-streaming call that returns the
    explanation text, the adversarial input that re-triggers the flagged
-   violation, and the Socratic follow-up questions. Fired first so that
-   ``adversarial_input`` and ``socratic`` are available immediately to the SSE
-   pipeline.
+   violation, and the Socratic follow-up questions. Because Groq's
+   ``response_format={"type": "json_object"}`` guarantees valid JSON but NOT the
+   field shape, the result is validated and the call retried once before raising
+   a ``ValueError`` — so a malformed response can never reach the sandbox as an
+   empty adversarial array (which would render a zero-frame trace).
 
-2. ``stream_explanation`` — a SECOND streaming call that streams only the
-   explanation prose token by token, alongside the trace animation.
+2. ``stream_explanation_from_string`` — chunk-yields the explanation that
+   ``llm_generate`` ALREADY produced, to approximate token streaming. This avoids
+   a second Groq call: it halves token usage and latency, and removes any chance
+   of a second explanation diverging from the structured one.
 
 The LLM never detects violations (that is the deterministic AST job in
 checker.py) and never emits code — for the adversarial case it emits only a
 data structure (``{"array": [...], "target": int}``).
 
 Model: llama-3.3-70b-versatile on Groq (free tier, ~800ms structured call
-latency). Groq's SDK is OpenAI-compatible: it has no Anthropic-style
-``output_config.format`` JSON-schema enforcement, so we use the OpenAI-style
-``response_format={"type": "json_object"}`` plus an explicit JSON instruction in
-the system prompt.
-
-Both public entry points are ``async`` because main.py awaits ``llm_generate``
-and ``async for``-iterates ``stream_explanation`` (see CLAUDE.md SSE stage 2/4),
-so only the AsyncGroq client is needed.
+latency). Both public entry points are ``async`` because main.py awaits
+``llm_generate`` and ``async for``-iterates the explanation stream.
 """
 
+import asyncio
 import json
 import os
 from typing import AsyncGenerator
@@ -104,16 +102,46 @@ def _violation_summary(violations: list[dict]) -> str:
     )
 
 
-async def llm_generate(source: str, violations: list[dict]) -> dict:
-    """One structured, non-streaming call.
+def _validate_generate(data: object) -> dict:
+    """Enforce the response shape json_object mode does not guarantee.
 
-    Returns:
-        {
-          "explanation": str,
-          "adversarial_input": {"array": list[int], "target": int},
-          "socratic": {"q1": str, "q2": str},
-        }
+    Fatal (raises ValueError → triggers a retry) only when a field the pipeline
+    genuinely needs is unusable. The adversarial array is the critical one: an
+    empty/invalid array would produce a zero-frame trace. `target` and `q2` are
+    coerced rather than treated as fatal.
     """
+    if not isinstance(data, dict):
+        raise ValueError("llm_schema: response was not a JSON object")
+
+    explanation = data.get("explanation")
+    if not isinstance(explanation, str) or not explanation.strip():
+        raise ValueError("llm_schema: missing a non-empty 'explanation'")
+
+    adv = data.get("adversarial_input")
+    if not isinstance(adv, dict):
+        raise ValueError("llm_schema: missing 'adversarial_input' object")
+    arr = adv.get("array")
+    if (
+        not isinstance(arr, list)
+        or len(arr) == 0
+        or not all(isinstance(x, int) and not isinstance(x, bool) for x in arr)
+    ):
+        raise ValueError(
+            "llm_schema: 'adversarial_input.array' must be a non-empty list of integers"
+        )
+    target = adv.get("target")
+    adv["target"] = target if isinstance(target, int) and not isinstance(target, bool) else 0
+
+    soc = data.get("socratic")
+    if not isinstance(soc, dict) or not isinstance(soc.get("q1"), str) or not soc["q1"].strip():
+        raise ValueError("llm_schema: missing 'socratic.q1'")
+    if not isinstance(soc.get("q2"), str):
+        soc["q2"] = ""
+
+    return data
+
+
+def _build_messages(source: str, violations: list[dict]) -> list[dict]:
     primary = _primary_violation(violations)
     severity = primary["severity"]
     n_questions = _QUESTION_COUNT.get(severity, 1)
@@ -146,45 +174,54 @@ adversarial_input: {adversarial_constraint} Generate an adversarial_input array 
 
 socratic: Provide {n_questions} Socratic question(s) in q1{' and q2' if n_questions > 1 else ''}. {q2_rule} Each question must probe WHY the code's cost is hidden — make the student reason about it — not WHAT to change. Do not name the bug or the violation."""
 
-    response = await _client().chat.completions.create(
-        model=MODEL,
-        messages=[
-            {"role": "system", "content": system},
-            {"role": "user", "content": user},
-        ],
-        response_format={"type": "json_object"},
-        temperature=0.3,  # deterministic enough to reliably re-trigger the violation
-    )
-
-    return json.loads(response.choices[0].message.content)
+    return [
+        {"role": "system", "content": system},
+        {"role": "user", "content": user},
+    ]
 
 
-async def stream_explanation(
-    source: str, violations: list[dict]
+async def llm_generate(source: str, violations: list[dict]) -> dict:
+    """One structured, non-streaming call with shape validation + one retry.
+
+    Returns:
+        {
+          "explanation": str,
+          "adversarial_input": {"array": list[int], "target": int},
+          "socratic": {"q1": str, "q2": str},
+        }
+
+    Raises ValueError ("llm_schema: ...") if the response is still malformed
+    after the retry, so the caller can surface a specific banner.
+    """
+    messages = _build_messages(source, violations)
+
+    last_error: Exception | None = None
+    for _attempt in range(2):  # initial call + one retry
+        response = await _client().chat.completions.create(
+            model=MODEL,
+            messages=messages,
+            response_format={"type": "json_object"},
+            temperature=0.3,  # deterministic enough to reliably re-trigger the violation
+        )
+        try:
+            data = json.loads(response.choices[0].message.content)
+            return _validate_generate(data)
+        except (json.JSONDecodeError, ValueError) as e:
+            last_error = e
+            continue
+
+    raise ValueError(f"llm_schema: invalid LLM response after retry — {last_error}")
+
+
+async def stream_explanation_from_string(
+    explanation: str, chunk_size: int = 4
 ) -> AsyncGenerator[str, None]:
-    """Second call: stream ONLY the explanation prose, token by token."""
-    primary = _primary_violation(violations)
-    severity = primary["severity"]
+    """Chunk-yield a pre-generated explanation to approximate token streaming.
 
-    system = "You are a CS pedagogy engine explaining algorithm violations to a student."
-    user = f"""{_depth_instruction(severity)} Explain this violation in plain English. Do not reveal the fix; write only the explanation prose with no headings or code.
-Violation: {_label(primary)}
-Severity: {severity}
-Code:
-```python
-{source}
-```"""
-
-    stream = await _client().chat.completions.create(
-        model=MODEL,
-        messages=[
-            {"role": "system", "content": system},
-            {"role": "user", "content": user},
-        ],
-        temperature=0.4,
-        stream=True,
-    )
-    async for chunk in stream:
-        delta = chunk.choices[0].delta.content
-        if delta:
-            yield delta
+    No second Groq call — the explanation comes straight from ``llm_generate``,
+    so the streamed text can never diverge from the structured-call explanation,
+    and we save one API request per grade.
+    """
+    for i in range(0, len(explanation), chunk_size):
+        yield explanation[i : i + chunk_size]
+        await asyncio.sleep(0.02)

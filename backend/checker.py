@@ -97,6 +97,8 @@ class SlidingWindowChecker(ast.NodeVisitor):
 
     def visit_Call(self, node: ast.Call) -> None:
         # sort_in_loop: .sort() or sorted() called inside a loop.
+        # NOTE: only full sorts are flagged. heapq.heappush / heapq.heappop are
+        # O(log N) and legitimate inside a loop — do NOT add them here.
         if self._loop_depth > 0:
             func = node.func
             is_sort = (

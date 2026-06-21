@@ -30,6 +30,13 @@ MAX_ARRAY_LEN = 10_000
 MEMORY_LIMIT_BYTES = 128 * 1024 * 1024  # 128 MB child RLIMIT_AS (Linux only)
 DEFAULT_TIMEOUT = 3
 
+# Hard cap on captured frames. Each frame deep-copies the array, so an
+# uncapped loop over a large array is O(N^2) memory — enough to blow RLIMIT_AS
+# on legitimate code and to produce a multi-hundred-MB SSE payload. 500 frames
+# is more than enough to animate while keeping memory and the payload bounded.
+MAX_FRAMES = 500
+_MAX_FRAMES_GLOBAL = "__algolens_max_frames__"
+
 # Extra wall-clock grace for process spawn + module import before we treat a
 # silent child as an infinite loop. The execution budget itself is `timeout`.
 # Spawn + import measures well under a second; 1.0s is a safe margin.
@@ -42,7 +49,12 @@ _BUILTIN_WHITELIST = (
 )
 
 # Names that are initialized to an int but are accumulators/targets, not pointers.
-_NON_POINTER_NAMES = {"target", "k", "result", "count"}
+# (Pointers in these patterns are almost always i/j/left/right/lo/hi; these names
+# are sums, results, or running counters and must not be mistaken for pointers.)
+_NON_POINTER_NAMES = {
+    "target", "k", "result", "count",
+    "ans", "res", "ret", "out", "output", "total", "curr", "cur", "prev",
+}
 
 # Internal global names used to invoke the submitted function inside the sandbox.
 _INPUT_GLOBAL = "__algolens_input__"
@@ -52,6 +64,36 @@ _TARGET_GLOBAL = "__algolens_target__"
 # --------------------------------------------------------------------------- #
 # Payload validation + typing-import stripping
 # --------------------------------------------------------------------------- #
+
+# Dunder attributes/names that enable sandbox escape via object traversal
+# (e.g. ().__class__.__base__.__subclasses__()[...].__init__.__globals__).
+# None of these require an import, so withholding __import__ is not enough.
+_FORBIDDEN_DUNDERS = {
+    "__class__", "__bases__", "__base__", "__subclasses__", "__mro__",
+    "__globals__", "__builtins__", "__dict__", "__getattribute__",
+    "__subclasshook__", "__init_subclass__", "__code__", "__closure__",
+}
+
+
+class _SafetyVisitor(ast.NodeVisitor):
+    """Reject dunder attribute/name access in submitted code.
+
+    Raises ValueError on the first forbidden access. Run on the ORIGINAL
+    student AST, before trace injection adds the internal `__trace__` name.
+    """
+
+    def visit_Attribute(self, node: ast.Attribute) -> None:
+        attr = node.attr
+        if attr in _FORBIDDEN_DUNDERS or (attr.startswith("__") and attr.endswith("__")):
+            raise ValueError(f"unsafe_code: attribute {attr!r} is not allowed")
+        self.generic_visit(node)
+
+    def visit_Name(self, node: ast.Name) -> None:
+        ident = node.id
+        if ident.startswith("__") and ident.endswith("__"):
+            raise ValueError(f"unsafe_code: name {ident!r} is not allowed")
+        self.generic_visit(node)
+
 
 def strip_typing_imports(source: str) -> str:
     """Remove `from typing import ...` and `import typing` lines.
@@ -64,8 +106,17 @@ def strip_typing_imports(source: str) -> str:
     than deleted, so line numbers stay aligned with the original source — the
     trace frames' `lineno` must agree with checker.py's violation line numbers.
     """
+    # Parenthesized multi-line form FIRST: `from typing import (\n  List,\n  Dict,\n)`.
+    # Replace with the same number of blank lines (preserve newline count) so trace
+    # `lineno`s stay aligned with checker.py's violation line numbers.
+    source = re.sub(
+        r'^[ \t]*from[ \t]+typing[ \t]+import[ \t]*\([^)]*\)',
+        lambda m: '\n' * m.group(0).count('\n'),
+        source, flags=re.MULTILINE | re.DOTALL,
+    )
+    # Single-line `from typing import ...` and `import typing[ as t]`.
     source = re.sub(r'^[ \t]*from[ \t]+typing[ \t]+import[ \t]+[^\n]*', '', source, flags=re.MULTILINE)
-    source = re.sub(r'^[ \t]*import[ \t]+typing[ \t]*$', '', source, flags=re.MULTILINE)
+    source = re.sub(r'^[ \t]*import[ \t]+typing\b[^\n]*', '', source, flags=re.MULTILINE)
     return source
 
 
@@ -75,6 +126,15 @@ def validate_payload(source: str, input_array: list) -> dict | None:
         return {"error": "source_too_large", "trace": []}
     if len(input_array) > MAX_ARRAY_LEN:
         return {"error": "array_too_large", "trace": []}
+
+    # Static safety pass: block dunder-traversal sandbox escapes before exec.
+    # A SyntaxError here is left for the stage-1 checker / compile to surface.
+    try:
+        _SafetyVisitor().visit(ast.parse(strip_typing_imports(source)))
+    except ValueError:
+        return {"error": "unsafe_code", "trace": []}
+    except SyntaxError:
+        pass
     return None
 
 
@@ -164,15 +224,23 @@ def infer_pointer_vars(tree: ast.AST, array_var: str | None) -> dict:
 
     candidates: list[str] = []
     for node in ast.walk(func):
+        # Pointer-initialized assignments (`left = 0`, `right = len(arr) - 1`)
+        # AND for-loop targets (`for right in range(len(arr))`) both qualify —
+        # the loop variable is the sweeping pointer in the canonical sliding
+        # window, and it is NOT an ast.Assign, so it must be picked up here.
+        targets: list = []
         if isinstance(node, ast.Assign) and _is_pointer_init(node.value, array_var):
-            for target in node.targets:
-                if (
-                    isinstance(target, ast.Name)
-                    and target.id not in exclude
-                    and target.id not in candidates
-                    and _is_used_as_index(func, target.id)
-                ):
-                    candidates.append(target.id)
+            targets = node.targets
+        elif isinstance(node, ast.For) and isinstance(node.target, ast.Name):
+            targets = [node.target]
+        for target in targets:
+            if (
+                isinstance(target, ast.Name)
+                and target.id not in exclude
+                and target.id not in candidates
+                and _is_used_as_index(func, target.id)
+            ):
+                candidates.append(target.id)
 
     if candidates:
         result["left"] = candidates[0]
@@ -225,13 +293,15 @@ class TraceInjector(ast.NodeTransformer):
         return f"'arr_snapshot': list({a}) if '{a}' in dir() else None"
 
     def _make_trace_snippet(self, lineno: int) -> str:
+        # Guard the append with the frame cap so a long/non-converging loop
+        # cannot grow the trace without bound (memory + SSE payload + animation).
         return (
-            "__trace__.append({"
+            f"__trace__.append({{"
             f"{self._field('left', self.left_var)}, "
             f"{self._field('right', self.right_var)}, "
             f"{self._snapshot_field()}, "
             f"'lineno': {lineno}"
-            "})"
+            f"}}) if len(__trace__) < {_MAX_FRAMES_GLOBAL} else None"
         )
 
     def visit_For(self, node: ast.For):
@@ -299,6 +369,7 @@ def _build_sandbox_globals(input_array: list, target, names: dict) -> dict:
         "__builtins__": sandbox_builtins,
         "typing": typing,  # safety net for inline `typing.List` references
         "__trace__": [],
+        _MAX_FRAMES_GLOBAL: MAX_FRAMES,
         _INPUT_GLOBAL: input_array,
         _TARGET_GLOBAL: target,
         "target": target,
@@ -309,26 +380,18 @@ def _build_sandbox_globals(input_array: list, target, names: dict) -> dict:
     return g
 
 
-def _execute_instrumented(source: str, input_array: list, target, names: dict) -> list:
-    """Run the instrumented submission, returning whatever trace was collected.
-
-    Benign runtime errors in the student's code do not discard the partial trace;
-    MemoryError is re-raised so the caller can report `memory_limit`.
-    """
-    code = _instrument_and_compile(source, input_array, target, names)
-    g = _build_sandbox_globals(input_array, target, names)
-    try:
-        exec(code, g)
-    except MemoryError:
-        raise
-    except Exception:
-        # Capture-as-far-as-it-got: the trace already lives in g["__trace__"].
-        pass
-    return g["__trace__"]
-
-
 def _sandbox_child(source, input_array, target, names, result_queue):
-    """Child-process entry point. Caps memory (Linux) then executes."""
+    """Child-process entry point. Caps memory (Linux) then executes.
+
+    Installs a SIGTERM handler that flushes whatever trace has been captured so
+    far. When the parent terminates a non-converging loop it sends SIGTERM, and
+    this handler is what lets the `infinite_loop` case ship its partial frames
+    (the array of captured iterations) instead of an empty trace — the frame cap
+    keeps that flushed list bounded.
+    """
+    import os
+    import signal
+
     try:
         import resource  # POSIX only; absent on Windows
         resource.setrlimit(
@@ -337,13 +400,31 @@ def _sandbox_child(source, input_array, target, names, result_queue):
     except Exception:
         pass  # Windows / unsupported — rely on the wall-clock timeout instead.
 
+    # Build globals here so the SIGTERM handler can read the live trace list.
+    code = _instrument_and_compile(source, input_array, target, names)
+    g = _build_sandbox_globals(input_array, target, names)
+    live_trace = g["__trace__"]
+
+    def _flush_on_term(signum, frame):
+        try:
+            result_queue.put({"error": "infinite_loop", "trace": list(live_trace)})
+        except Exception:
+            pass
+        os._exit(0)
+
     try:
-        trace = _execute_instrumented(source, input_array, target, names)
-        result_queue.put({"error": None, "trace": trace})
+        signal.signal(signal.SIGTERM, _flush_on_term)
+    except (ValueError, OSError):
+        pass  # not on main thread / unsupported — parent falls back to [] trace.
+
+    try:
+        exec(code, g)
+        result_queue.put({"error": None, "trace": list(live_trace)})
     except MemoryError:
         result_queue.put({"error": "memory_limit", "trace": []})
     except Exception:
-        result_queue.put({"error": "runtime_error", "trace": []})
+        # Benign student runtime error — keep whatever was captured.
+        result_queue.put({"error": "runtime_error", "trace": list(live_trace)})
 
 
 def sandboxed_run(source: str, input_array: list, target, timeout: int = DEFAULT_TIMEOUT) -> dict:
@@ -373,10 +454,16 @@ def sandboxed_run(source: str, input_array: list, target, timeout: int = DEFAULT
         # Drain the queue first to avoid a join-before-drain feeder deadlock.
         result = result_queue.get(timeout=timeout + _STARTUP_GRACE)
     except queue.Empty:
-        # Still running past its budget → treat as a non-converging loop.
+        # Still running past its budget → non-converging loop. terminate() sends
+        # SIGTERM, which the child's handler catches to flush its partial trace;
+        # drain that here so the infinite-loop demo can play the captured frames.
         proc.terminate()
+        try:
+            result = result_queue.get(timeout=0.5)
+        except queue.Empty:
+            result = {"error": "infinite_loop", "trace": []}
         proc.join()
-        return {"error": "infinite_loop", "trace": []}
+        return result
 
     proc.join(1)
     if proc.is_alive():
