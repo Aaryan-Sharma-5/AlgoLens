@@ -1,0 +1,15 @@
+# Keep the build context small and prevent host (Windows) artifacts from
+# clobbering the Linux deps installed inside the image.
+**/node_modules
+**/.next
+backend/venv
+**/__pycache__
+**/*.pyc
+**/.pytest_cache
+.git
+**/.gitignore
+.env
+**/*.md
+Dockerfile
+.dockerignore
+docker-compose.yml

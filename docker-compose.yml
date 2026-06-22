@@ -1,0 +1,12 @@
+services:
+  algolens:
+    build: .
+    image: algolens
+    container_name: algolens
+    ports:
+      - "8000:8000" # FastAPI backend
+      - "3000:3000" # Next.js frontend
+    environment:
+      # Passed through from the host environment (or a sibling .env file).
+      GROQ_API_KEY: ${GROQ_API_KEY:-}
+    restart: unless-stopped
