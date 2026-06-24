@@ -70,7 +70,7 @@ export default function TraceAnimator({ trace, error }: TraceAnimatorProps) {
   // not the neutral "submit code" placeholder — or the demo looks like nothing ran.
   if (trace.length === 0) {
     return (
-      <div className="flex h-full flex-col items-center justify-center gap-2 rounded-lg border border-neutral-800 p-6 text-center text-sm text-neutral-500">
+      <div className="flex h-full flex-col items-center justify-center gap-3 rounded-lg border border-neutral-800 p-6 text-center text-sm">
         {error === "infinite_loop" ? (
           <span className="text-red-300">
             Execution halted — pointer state never converged before timeout.
@@ -80,7 +80,27 @@ export default function TraceAnimator({ trace, error }: TraceAnimatorProps) {
             Execution error: <span className="font-mono">{error}</span>
           </span>
         ) : (
-          <span>Submit code to see the execution trace.</span>
+          <>
+            <span className="text-neutral-500">
+              Submit code to watch it run on an adversarial input.
+            </span>
+            <div className="flex items-center gap-4 text-xs text-neutral-600">
+              <span className="flex items-center gap-1.5">
+                <span
+                  className="inline-block h-3 w-3 rounded-sm"
+                  style={{ backgroundColor: LEFT }}
+                />
+                left pointer
+              </span>
+              <span className="flex items-center gap-1.5">
+                <span
+                  className="inline-block h-3 w-3 rounded-sm"
+                  style={{ backgroundColor: RIGHT }}
+                />
+                right pointer
+              </span>
+            </div>
+          </>
         )}
       </div>
     );

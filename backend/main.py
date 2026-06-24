@@ -17,9 +17,16 @@ import asyncio
 import json
 from typing import AsyncGenerator
 
+from pathlib import Path
+
+from dotenv import load_dotenv
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
+
+# Load backend/.env regardless of the directory uvicorn is launched from, so
+# GROQ_API_KEY is present before llm_layer's lazy client first reads it.
+load_dotenv(Path(__file__).parent / ".env")
 
 from .checker import check_contract
 from .instrumenter import sandboxed_run
@@ -87,6 +94,19 @@ async def _grade_events(req: GradeRequest) -> AsyncGenerator[str, None]:
 
     if not violations:
         yield _sse("done", {"status": "clean", "message": "No violations found."})
+        return
+
+    # Pattern-presence rejection: a loopless submission has nothing to instrument,
+    # animate, or generate an adversarial input for. Surface the violation (Monaco
+    # decoration is already on the wire) and stop before the LLM/sandbox stages.
+    if any(v["type"] == "missing_iteration_structure" for v in violations):
+        yield _sse(
+            "done",
+            {
+                "status": "no_iteration",
+                "message": "No iteration structure found — this code does not implement the selected pattern.",
+            },
+        )
         return
 
     # Stage 2: one structured LLM call. A shape failure (ValueError "llm_schema")

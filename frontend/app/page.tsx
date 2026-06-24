@@ -74,8 +74,12 @@ const TEMPLATE: Record<PatternKey, string> = {
 // fallback). Distinct copy/colour for every case — never a single generic string.
 const BANNER: Record<string, { text: string; cls: string }> = {
   clean: {
-    text: "No violations found. Code satisfies the pattern contract.",
+    text: "No anti-patterns detected. (Verification is limited to contract structural checks.)",
     cls: "border-green-500/50 bg-green-500/10 text-green-300",
+  },
+  no_iteration: {
+    text: "No loop found — this code doesn't implement the selected pattern. There's no iteration structure to verify.",
+    cls: "border-red-500/50 bg-red-500/10 text-red-300",
   },
   syntax_error: {
     text: "Syntax error in submission. Check your Python.",
@@ -198,7 +202,13 @@ export default function Home() {
         },
         onDone: (info) => {
           setLoading(false);
-          if (info.status === "clean") setBannerCode("clean");
+          // Early-exit paths (clean / loopless) never run adv→sandbox→explain;
+          // snap the strip back to "AST done, rest idle" so nothing keeps pulsing.
+          if (info.status === "clean" || info.status === "no_iteration") {
+            setBannerCode(info.status);
+            setPipeline({ ...INITIAL_PIPELINE, ast: "done" });
+            return;
+          }
           setPipeline((p) =>
             p.explain === "active" ? { ...p, explain: "done" } : p,
           );
@@ -218,8 +228,15 @@ export default function Home() {
       <div className="mx-auto max-w-7xl">
         {/* Header */}
         <header className="mb-6">
-          <h1 className="text-2xl font-bold tracking-tight">AlgoLens</h1>
-          <p className="text-sm text-neutral-500">Not a linter. A pedagogue.</p>
+          <h1
+            className="font-display text-xl tracking-tight"
+            style={{ color: "#C97832" }}
+          >
+            AlgoLens
+          </h1>
+          <p className="mt-1.5 text-sm text-neutral-500">
+            Not a linter. A pedagogue.
+          </p>
         </header>
 
         {/* Pattern selector with inline use-case hints */}

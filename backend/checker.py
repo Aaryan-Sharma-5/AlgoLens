@@ -13,18 +13,20 @@ import ast
 
 # Severity map — used by the LLM prompt and the frontend badge color.
 SEVERITY = {
-    "implicit_slice_loop":      "critical",
-    "nested_loop":              "major",
-    "sort_in_loop":             "major",
-    "linear_membership_check":  "minor",
+    "implicit_slice_loop":          "critical",
+    "nested_loop":                  "major",
+    "sort_in_loop":                 "major",
+    "linear_membership_check":      "minor",
+    "missing_iteration_structure":  "critical",
 }
 
 # Human labels — sent to the frontend. Never show raw violation type keys to the user.
 VIOLATION_LABELS = {
-    "linear_membership_check": "Slow lookup inside loop (O(N²) hidden cost)",
-    "implicit_slice_loop":     "Array slice inside loop creates implicit second loop",
-    "nested_loop":             "Nested loop detected — expected single pass",
-    "sort_in_loop":            "Sort inside loop — O(N² log N) total cost",
+    "linear_membership_check":     "Slow lookup inside loop (O(N²) hidden cost)",
+    "implicit_slice_loop":         "Array slice inside loop creates implicit second loop",
+    "nested_loop":                 "Nested loop detected — expected single pass",
+    "sort_in_loop":                "Sort inside loop — O(N² log N) total cost",
+    "missing_iteration_structure": "No loop found — this code doesn't implement an iterative pattern",
 }
 
 # Annotation base names that make a `x in container` lookup O(1), so the
@@ -137,6 +139,36 @@ class TwoPointerChecker(SlidingWindowChecker):
         self.generic_visit(node)
 
 
+class LoopCountVisitor(ast.NodeVisitor):
+    """Counts iteration structures (For/While) anywhere in the tree.
+
+    Powers the pattern-presence guard. A submission with zero loops is not an
+    algorithm — it is a static constant — and must never pass as 'contract
+    satisfied'. Comprehensions are intentionally NOT counted (For/While only),
+    matching the scoped decision in the spec.
+    """
+
+    def __init__(self) -> None:
+        self.loop_count: int = 0
+
+    def visit_For(self, node: ast.For) -> None:
+        self.loop_count += 1
+        self.generic_visit(node)
+
+    def visit_While(self, node: ast.While) -> None:
+        self.loop_count += 1
+        self.generic_visit(node)
+
+
+def _as_report(vtype: str, lineno: int) -> dict:
+    return {
+        "type": vtype,
+        "lineno": lineno,
+        "severity": SEVERITY[vtype],
+        "label": VIOLATION_LABELS[vtype],
+    }
+
+
 def check_contract(source: str, pattern: str) -> list[dict]:
     """Public entry point: parse ``source`` and run the checker for ``pattern``.
 
@@ -145,28 +177,32 @@ def check_contract(source: str, pattern: str) -> list[dict]:
     """
     tree = ast.parse(source)
 
+    if pattern not in ("sliding_window", "two_pointers"):
+        raise ValueError(
+            f"Unknown pattern {pattern!r}. Expected 'sliding_window' or 'two_pointers'."
+        )
+
+    # Pattern-presence guard (runs first): with zero loops, no other check can
+    # fire — every pattern violation requires loop depth > 0 — so a loopless
+    # submission would otherwise pass as clean. Reject it explicitly instead.
+    loop_counter = LoopCountVisitor()
+    loop_counter.visit(tree)
+    if loop_counter.loop_count == 0:
+        func = next(
+            (n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)), None
+        )
+        return [_as_report("missing_iteration_structure", func.lineno if func else 1)]
+
     if pattern == "sliding_window":
         checker: SlidingWindowChecker = SlidingWindowChecker()
-    elif pattern == "two_pointers":
+    else:  # two_pointers
         list_args = [
             name
             for name, annotation in extract_func_args(tree)
             if not _annotation_is_hashed_lookup(annotation)
         ]
         checker = TwoPointerChecker(list_args=list_args)
-    else:
-        raise ValueError(
-            f"Unknown pattern {pattern!r}. Expected 'sliding_window' or 'two_pointers'."
-        )
 
     checker.visit(tree)
 
-    return [
-        {
-            "type": v["type"],
-            "lineno": v["lineno"],
-            "severity": SEVERITY[v["type"]],
-            "label": VIOLATION_LABELS[v["type"]],
-        }
-        for v in checker.violations
-    ]
+    return [_as_report(v["type"], v["lineno"]) for v in checker.violations]
