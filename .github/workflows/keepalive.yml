@@ -1,0 +1,15 @@
+name: keep-render-awake
+
+# Render free-tier web services spin down after 15 min of no inbound traffic (~50 s cold start). This pings /health every 14 min so a judge reviewing at any hour hits a warm backend instead of a timed-out SSE stream.
+
+on:
+  schedule:
+    - cron: "*/14 * * * *"
+  workflow_dispatch: {}
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping /health
+        run: curl -fsS --retry 3 --retry-delay 5 --max-time 60 https://algolens-backend.onrender.com/health
