@@ -11,6 +11,10 @@ import type { TraceFrame } from "../lib/grading-stream";
 interface TraceAnimatorProps {
   trace: TraceFrame[];
   error: string | null;
+  // Reports the lineno of the frame at currentIdx (or null) so the editor can highlight the executing line in sync with the animation.
+  onActiveLine?: (lineno: number | null) => void;
+  // Fired once when the animation reaches its final frame — gates the Socratic reveal so reflection follows the visual failure rather than competing with it.
+  onComplete?: () => void;
 }
 
 type Speed = "slow" | "normal" | "fast";
@@ -21,18 +25,35 @@ const LEFT = "#C97832";
 const RIGHT = "#4A90E2";
 const DEFAULT_CELL = "#1a1a1a";
 
-export default function TraceAnimator({ trace, error }: TraceAnimatorProps) {
-  // The page remounts this component (via a changing `key`) whenever a new trace
-  // arrives, so these initializers re-run per trace — auto-play starts on mount
-  // with no synchronous setState-in-effect. currentIdx remains the single source
-  // of truth for the rendered frame.
+export default function TraceAnimator({
+  trace,
+  error,
+  onActiveLine,
+  onComplete,
+}: TraceAnimatorProps) {
+  // The page remounts this component (via a changing `key`) whenever a new trace arrives, so these initializers re-run per trace — auto-play starts on mount with no synchronous setState-in-effect. currentIdx remains the single source of truth for the rendered frame.
   const [currentIdx, setCurrentIdx] = useState(0);
   const [isPlaying, setIsPlaying] = useState(() => trace.length > 1);
   const [speed, setSpeed] = useState<Speed>("normal");
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const completedRef = useRef(false);
 
   const lastIdx = Math.max(0, trace.length - 1);
   const atEnd = currentIdx >= lastIdx;
+
+  // Sync the executing line to the editor as the frame changes.
+  useEffect(() => {
+    const f = trace[currentIdx];
+    onActiveLine?.(f ? f.lineno : null);
+  }, [currentIdx, trace, onActiveLine]);
+
+  // Fire onComplete once when the final frame is reached (component remounts per trace via a changing key, so completedRef resets naturally each grade).
+  useEffect(() => {
+    if (trace.length > 0 && currentIdx >= trace.length - 1 && !completedRef.current) {
+      completedRef.current = true;
+      onComplete?.();
+    }
+  }, [currentIdx, trace.length, onComplete]);
 
   // Playback loop: a setInterval that increments currentIdx, cleared on stop.
   useEffect(() => {
@@ -65,9 +86,7 @@ export default function TraceAnimator({ trace, error }: TraceAnimatorProps) {
     setCurrentIdx((i) => Math.min(lastIdx, i + 1));
   }
 
-  // Empty trace: surface the sandbox error (memory_limit, etc.) or a placeholder.
-  // infinite_loop with no captured frames must still show the halt message —
-  // not the neutral "submit code" placeholder — or the demo looks like nothing ran.
+  // Empty trace: surface the sandbox error (memory_limit, etc.) or a placeholder. infinite_loop with no captured frames must still show the halt message/ not the neutral "submit code" placeholder — or the demo looks like nothing ran.
   if (trace.length === 0) {
     return (
       <div className="flex h-full flex-col items-center justify-center gap-3 rounded-lg border border-neutral-800 p-6 text-center text-sm">

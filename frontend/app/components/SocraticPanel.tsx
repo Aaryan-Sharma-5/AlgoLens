@@ -13,6 +13,9 @@ import type { Socratic } from "../lib/grading-stream";
 
 interface SocraticPanelProps {
   socratic: Socratic | null;
+  // When true, the questions are blurred behind a "Reveal analysis" gate so the student watches the execution failure before reflecting on it.
+  locked?: boolean;
+  onReveal?: () => void;
 }
 
 const ACCENT = "#C97832";
@@ -31,7 +34,11 @@ function QuestionRow({ index, text }: { index: number; text: string }) {
   );
 }
 
-export default function SocraticPanel({ socratic }: SocraticPanelProps) {
+export default function SocraticPanel({
+  socratic,
+  locked = false,
+  onReveal,
+}: SocraticPanelProps) {
   const [revealed, setRevealed] = useState(false);
 
   if (!socratic) return null;
@@ -42,29 +49,47 @@ export default function SocraticPanel({ socratic }: SocraticPanelProps) {
 
   return (
     <div
-      className="rounded-lg border p-4"
+      className="relative rounded-lg border p-4"
       style={{ borderColor: "rgba(201,120,50,0.4)" }}
     >
-      <h2
-        className="mb-3 text-xs font-semibold uppercase tracking-wider"
-        style={{ color: ACCENT }}
-      >
-        Think it through
-      </h2>
-
-      <ol className="space-y-3">
-        <QuestionRow index={1} text={q1} />
-        {q2 && revealed && <QuestionRow index={2} text={q2} />}
-      </ol>
-
-      {q2 && !revealed && (
-        <button
-          onClick={() => setRevealed(true)}
-          className="mt-4 rounded-md border px-3 py-1.5 text-xs font-medium"
-          style={{ borderColor: ACCENT, color: ACCENT }}
+      <div className={locked ? "select-none blur-sm" : ""}>
+        <h2
+          className="mb-3 text-xs font-semibold uppercase tracking-wider"
+          style={{ color: ACCENT }}
         >
-          I&apos;ve thought about it →
-        </button>
+          Think it through
+        </h2>
+
+        <ol className="space-y-3">
+          <QuestionRow index={1} text={q1} />
+          {q2 && revealed && <QuestionRow index={2} text={q2} />}
+        </ol>
+
+        {q2 && !revealed && (
+          <button
+            onClick={() => setRevealed(true)}
+            className="mt-4 rounded-md border px-3 py-1.5 text-xs font-medium"
+            style={{ borderColor: ACCENT, color: ACCENT }}
+          >
+            I&apos;ve thought about it →
+          </button>
+        )}
+      </div>
+
+      {/* Progressive disclosure gate: reflection follows the visual failure. */}
+      {locked && (
+        <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 rounded-lg bg-black/50 text-center">
+          <span className="text-xs text-neutral-400">
+            Watch the execution first.
+          </span>
+          <button
+            onClick={onReveal}
+            className="rounded-md border px-3 py-1.5 text-xs font-medium"
+            style={{ borderColor: ACCENT, color: ACCENT }}
+          >
+            Reveal analysis →
+          </button>
+        </div>
       )}
     </div>
   );

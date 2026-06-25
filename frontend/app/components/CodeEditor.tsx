@@ -26,16 +26,20 @@ interface CodeEditorProps {
   value: string;
   onChange: (value: string) => void;
   violations: Violation[];
+  // The line currently executing in the TraceAnimator (1-based), or null. Drives the pulsing execution highlight that syncs the editor to the animation.
+  activeLine?: number | null;
 }
 
 export default function CodeEditor({
   value,
   onChange,
   violations,
+  activeLine,
 }: CodeEditorProps) {
   const editorRef = useRef<editor.IStandaloneCodeEditor | null>(null);
   const monacoRef = useRef<Monaco | null>(null);
   const decorationIds = useRef<string[]>([]);
+  const activeDecoIds = useRef<string[]>([]);
 
   function applyDecorations(items: Violation[]) {
     const ed = editorRef.current;
@@ -71,6 +75,26 @@ export default function CodeEditor({
     applyDecorations(violations);
   }, [violations]);
 
+  // Bidirectional execution sync: highlight the line the animator is currently executing. Kept in a SEPARATE decoration set so it never clobbers the violation decorations on the same line.
+  useEffect(() => {
+    const ed = editorRef.current;
+    const monaco = monacoRef.current;
+    if (!ed || !monaco) return;
+    const decos = activeLine
+      ? [
+          {
+            range: new monaco.Range(activeLine, 1, activeLine, 1),
+            options: {
+              isWholeLine: true,
+              className: "line-exec-active",
+              glyphMarginClassName: "glyph-exec-active",
+            },
+          },
+        ]
+      : [];
+    activeDecoIds.current = ed.deltaDecorations(activeDecoIds.current, decos);
+  }, [activeLine]);
+
   return (
     <div className="h-full w-full overflow-hidden rounded-lg border border-neutral-800">
       {/* Decoration styles are global (Monaco renders className-only elements). */}
@@ -84,6 +108,17 @@ export default function CodeEditor({
         }
         .glyph-critical { background-color: #ef4444; }
         .glyph-major    { background-color: #f97316; }
+        .line-exec-active { animation: execpulse 1.2s ease-in-out infinite; }
+        @keyframes execpulse {
+          0%, 100% { background-color: rgba(201, 120, 50, 0.10); }
+          50%      { background-color: rgba(201, 120, 50, 0.30); }
+        }
+        .glyph-exec-active {
+          margin-left: 5px;
+          width: 6px !important;
+          border-radius: 9999px;
+          background-color: #C97832;
+        }
       `}</style>
       <Editor
         height="100%"

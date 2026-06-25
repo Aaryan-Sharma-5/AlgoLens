@@ -1,8 +1,9 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useCallback, useRef, useState } from "react";
 import CodeEditor from "./components/CodeEditor";
 import TraceAnimator from "./components/TraceAnimator";
+import TerminalLoader from "./components/TerminalLoader";
 import ExplanationPanel from "./components/ExplanationPanel";
 import SocraticPanel from "./components/SocraticPanel";
 import PipelineStrip, {
@@ -150,7 +151,23 @@ export default function Home() {
   const [pipeline, setPipeline] = useState<PipelineState>(INITIAL_PIPELINE);
   const [loading, setLoading] = useState(false);
 
+  // The editor line currently executing in the animation (bidirectional sync).
+  const [activeLine, setActiveLine] = useState<number | null>(null);
+  // Live terminal-style pipeline log shown while the LLM + sandbox run.
+  const [logs, setLogs] = useState<string[]>([]);
+  // Socratic stays gated until the animation completes (or the user reveals it).
+  const [socraticUnlocked, setSocraticUnlocked] = useState(false);
+
   const abortRef = useRef<AbortController | null>(null);
+  const startRef = useRef<number>(0);
+  const explainLoggedRef = useRef(false);
+
+  const pushLog = useCallback((line: string) => {
+    const ms = Math.round(performance.now() - startRef.current);
+    setLogs((l) => [...l, `[${ms}ms] ${line}`]);
+  }, []);
+
+  const handleAnimationComplete = useCallback(() => setSocraticUnlocked(true), []);
 
   function selectPattern(key: PatternKey) {
     if (key === pattern) return;
@@ -173,6 +190,9 @@ export default function Home() {
     setSocratic(null);
     setBannerCode(null);
     setPipeline(INITIAL_PIPELINE);
+    setActiveLine(null);
+    setLogs([]);
+    setSocraticUnlocked(false);
   }
 
   function handleSubmit() {
@@ -187,12 +207,20 @@ export default function Home() {
     setBannerCode(null);
     setPipeline({ ...INITIAL_PIPELINE, ast: "active" });
     setLoading(true);
+    setActiveLine(null);
+    setSocraticUnlocked(false);
+    startRef.current = performance.now();
+    explainLoggedRef.current = false;
+    setLogs([]);
+    pushLog(`POST /grade — pattern: ${pattern}`);
 
     runGrading(
       { source, pattern },
       {
         onViolations: (v) => {
           setViolations(v);
+          pushLog(`AST contract verified — ${v.length} violation${v.length === 1 ? "" : "s"}`);
+          if (v.length > 0) pushLog("Generating adversarial input…");
           setPipeline((p) => ({
             ...p,
             ast: "done",
@@ -202,9 +230,20 @@ export default function Home() {
         onAdversarialTrace: (result) => {
           setAdversarial(result);
           setTraceVersion((v) => v + 1);
+          if (result.error && result.error !== "infinite_loop") {
+            pushLog(`Sandbox halted — ${result.error}`);
+          } else {
+            pushLog(
+              `Sandbox executed — ${result.trace.length} frame${result.trace.length === 1 ? "" : "s"} captured`,
+            );
+          }
           setPipeline((p) => ({ ...p, adv: "done", sandbox: "done" }));
         },
         onToken: (text) => {
+          if (!explainLoggedRef.current) {
+            explainLoggedRef.current = true;
+            pushLog("Streaming explanation…");
+          }
           setExplanation((prev) => prev + text);
           setPipeline((p) =>
             p.explain === "idle" ? { ...p, explain: "active" } : p,
@@ -213,6 +252,7 @@ export default function Home() {
         onSocratic: setSocratic,
         onError: (code, message) => {
           setBannerCode(code);
+          pushLog(`✗ ${code}`);
           if (code === "pipeline_error" || code === "network") {
             console.error("[AlgoLens]", code, message);
           }
@@ -226,8 +266,14 @@ export default function Home() {
           if (info.status === "clean" || info.status === "no_iteration") {
             setBannerCode(info.status);
             setPipeline({ ...INITIAL_PIPELINE, ast: "done" });
+            pushLog(
+              info.status === "clean"
+                ? "Done — no anti-patterns"
+                : "Done — no iteration structure",
+            );
             return;
           }
+          pushLog("Done.");
           setPipeline((p) =>
             p.explain === "active" ? { ...p, explain: "done" } : p,
           );
@@ -239,14 +285,17 @@ export default function Home() {
 
   const banner = bannerCode ? BANNER[bannerCode] ?? BANNER.pipeline_error : null;
 
+  // Show the terminal log while the LLM + sandbox run (no trace yet); swap to the animator the moment the adversarial trace arrives.
+  const showTerminal = loading && !adversarial;
+
   return (
     <main
-      className="min-h-screen w-full px-6 py-6 text-neutral-100"
+      className="flex h-screen flex-col overflow-hidden px-6 py-4 text-neutral-100"
       style={{ backgroundColor: "#050505" }}
     >
-      <div className="mx-auto max-w-7xl">
+      <div className="mx-auto flex min-h-0 w-full max-w-7xl flex-1 flex-col">
         {/* Header */}
-        <header className="mb-6">
+        <header className="mb-3 shrink-0">
           <h1
             className="font-display text-xl tracking-tight"
             style={{ color: "#C97832" }}
@@ -259,14 +308,14 @@ export default function Home() {
         </header>
 
         {/* Pattern selector with inline use-case hints */}
-        <div className="mb-5 flex flex-wrap gap-3">
+        <div className="mb-3 flex shrink-0 flex-wrap gap-3">
           {PATTERNS.map((p) => {
             const active = p.key === pattern;
             return (
               <button
                 key={p.key}
                 onClick={() => selectPattern(p.key)}
-                className={`min-w-65 flex-1 rounded-lg border px-4 py-3 text-left transition-colors ${
+                className={`min-w-60 flex-1 rounded-lg border px-4 py-2.5 text-left transition-colors ${
                   active
                     ? "border-neutral-500 bg-neutral-900"
                     : "border-neutral-800 hover:border-neutral-700"
@@ -285,46 +334,63 @@ export default function Home() {
         </div>
 
         {/* Agent pipeline visibility */}
-        <PipelineStrip pipeline={pipeline} />
+        <div className="shrink-0">
+          <PipelineStrip pipeline={pipeline} />
+        </div>
 
-        <div className="grid gap-5 lg:grid-cols-2">
+        {/* Editor + results share one viewport — no scrolling to see cause/effect. */}
+        <div className="grid min-h-0 flex-1 gap-5 lg:grid-cols-2">
           {/* Left: editor + submit */}
-          <div className="flex flex-col gap-3">
-            <div className="h-105">
+          <div className="flex min-h-0 flex-col gap-3">
+            <div className="min-h-0 flex-1">
               <CodeEditor
                 value={source}
                 onChange={setSource}
                 violations={violations}
+                activeLine={activeLine}
               />
             </div>
             <button
               onClick={handleSubmit}
               disabled={loading}
-              className="rounded-md px-4 py-2.5 text-sm font-semibold text-black disabled:opacity-50"
+              className="shrink-0 rounded-md px-4 py-2.5 text-sm font-semibold text-black disabled:opacity-50"
               style={{ backgroundColor: "#C97832" }}
             >
               {loading ? "Grading…" : "Grade submission"}
             </button>
           </div>
 
-          {/* Right: results */}
-          <div className="flex flex-col gap-4">
+          {/* Right: results — scrolls internally so the page never grows. */}
+          <div className="flex min-h-0 flex-col gap-4 overflow-y-auto pr-1">
             {banner && (
-              <div className={`rounded-lg border px-4 py-3 text-sm ${banner.cls}`}>
+              <div
+                className={`shrink-0 rounded-lg border px-4 py-3 text-sm ${banner.cls}`}
+              >
                 {banner.text}
               </div>
             )}
 
-            <div className="h-80">
-              <TraceAnimator
-                key={traceVersion}
-                trace={adversarial?.trace ?? []}
-                error={adversarial?.error ?? null}
-              />
+            <div className="h-80 shrink-0">
+              {showTerminal ? (
+                <TerminalLoader logs={logs} />
+              ) : (
+                <TraceAnimator
+                  key={traceVersion}
+                  trace={adversarial?.trace ?? []}
+                  error={adversarial?.error ?? null}
+                  onActiveLine={setActiveLine}
+                  onComplete={handleAnimationComplete}
+                />
+              )}
             </div>
 
             <ExplanationPanel text={explanation} streaming={loading} />
-            <SocraticPanel key={`soc-${traceVersion}`} socratic={socratic} />
+            <SocraticPanel
+              key={`soc-${traceVersion}`}
+              socratic={socratic}
+              locked={!socraticUnlocked}
+              onReveal={() => setSocraticUnlocked(true)}
+            />
           </div>
         </div>
       </div>
