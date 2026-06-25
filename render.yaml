@@ -1,0 +1,19 @@
+# Render Blueprint for the AlgoLens backend (FastAPI + sandbox).
+# The backend MUST run on a Linux host with real processes: the sandbox uses multiprocessing (spawn) + resource.RLIMIT_AS, which serverless platforms (Vercel/Lambda) block. Render's native Python web service provides both.
+
+services:
+  - type: web
+    name: algolens-backend
+    runtime: python
+    plan: free
+    rootDir: .
+    buildCommand: pip install -r backend/requirements.txt
+    startCommand: uvicorn backend.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    envVars:
+      # Pin the interpreter so pydantic-core installs from a prebuilt wheel (3.13+ has no wheel for pydantic-core 2.18.1 and would fail to compile).
+      - key: PYTHON_VERSION
+        value: "3.12.7"
+      # Secret — set this in the Render dashboard, never commit it.
+      - key: GROQ_API_KEY
+        sync: false

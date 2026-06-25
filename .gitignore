@@ -1,0 +1,19 @@
+# Secrets — never commit. Only .env.example is tracked.
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+venv/
+.venv/
+
+# Node / Next.js
+node_modules/
+.next/
+out/
+
+# OS / editor
+.DS_Store
+Thumbs.db

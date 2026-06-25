@@ -1,12 +1,11 @@
 // Typed POST-SSE client for the FastAPI /grade endpoint.
-//
-// Native EventSource is GET-only, so we use @microsoft/fetch-event-source, which
-// supports POST + JSON body and exposes the named SSE `event:` field on each
-// message. Event sequence (per CLAUDE.md):
-//   violations → adversarial_trace → explanation* → socratic → done
-// plus a backend `error` event that must be surfaced, not crash the stream.
+// Native EventSource is GET-only, so we use @microsoft/fetch-event-source, which supports POST + JSON body and exposes the named SSE `event:` field on each message. Event sequence: violations → adversarial_trace → explanation* → socratic → done plus a backend `error` event that must be surfaced, not crash the stream.
 
 import { fetchEventSource } from "@microsoft/fetch-event-source";
+
+// In production (Vercel) the browser hits the Render backend directly so the SSE stream isn't buffered by a proxy — set NEXT_PUBLIC_API_URL to the Render URL.  Locally it's unset, so requests go to `/api/grade` and the Next.js dev server rewrites `/api/*` to http://localhost:8000. CORS on the backend is `*`.
+const API_BASE = process.env.NEXT_PUBLIC_API_URL?.replace(/\/$/, "");
+const GRADE_URL = API_BASE ? `${API_BASE}/grade` : "/api/grade";
 
 export interface Violation {
   type: string;
@@ -39,8 +38,7 @@ export interface GradePayload {
   target?: number;
 }
 
-// Typed error codes emitted by the backend (plus "network" for a transport-level
-// failure surfaced client-side). The page maps each to distinct copy + colour.
+// Typed error codes emitted by the backend (plus "network" for a transport-level failure surfaced client-side). The page maps each to distinct copy + colour.
 export type GradeErrorCode =
   | "syntax_error"
   | "invalid_pattern"
@@ -72,7 +70,7 @@ export async function runGrading(
   signal?: AbortSignal,
 ): Promise<void> {
   try {
-    await fetchEventSource("/api/grade", {
+    await fetchEventSource(GRADE_URL, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
