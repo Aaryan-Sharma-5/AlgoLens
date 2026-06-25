@@ -55,6 +55,11 @@ ADVERSARIAL_CONSTRAINTS = {
     "sort_in_loop": (
         "Generate an array that is reverse-sorted so every sort call does maximum work."
     ),
+    "non_halving_search": (
+        "Generate a large SORTED array where the target value sits at the very last "
+        "position, so a linear bound advance must scan almost every element before "
+        "finding it — exposing the O(N) cost a real binary search would avoid."
+    ),
 }
 
 # Severity-routed explanation depth.
@@ -68,7 +73,10 @@ _EXPLANATION_DEPTH = {
 _QUESTION_COUNT = {"critical": 2, "major": 2, "minor": 1}
 
 # Words that would name the bug / hint the fix — banned from Socratic questions.
-_BANNED_WORDS = ("nested", "slice", "sort", "sorted", "membership")
+_BANNED_WORDS = (
+    "nested", "slice", "sort", "sorted", "membership",
+    "halve", "halving", "midpoint", "bisect", "binary",
+)
 
 # Lazily-constructed shared async client so importing this module never requires
 # GROQ_API_KEY to be set (it is only needed when a call is actually made).

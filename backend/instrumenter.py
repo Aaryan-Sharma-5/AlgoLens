@@ -176,6 +176,50 @@ def _is_pointer_init(value: ast.AST, array_var: str | None) -> bool:
     return False
 
 
+def _loop_test_names(func: ast.AST) -> set[str]:
+    """Names appearing in any While loop's test (`while lo <= hi` -> {lo, hi}).
+
+    Binary-search bounds are never array indices — only the midpoint indexes the
+    array — so they must be recognised through the loop condition instead.
+    """
+    names: set[str] = set()
+    for node in ast.walk(func):
+        if isinstance(node, ast.While):
+            for sub in ast.walk(node.test):
+                if isinstance(sub, ast.Name):
+                    names.add(sub.id)
+    return names
+
+
+def _reassigned_in_loop_names(func: ast.AST) -> set[str]:
+    """Names reassigned (Assign/AugAssign) inside any loop body.
+
+    A moving pointer is updated every iteration; a constant bound like
+    `n = len(arr)` is set once outside the loop and never reassigned. This
+    distinguishes the two, keeping constants out of the pointer set.
+    """
+    names: set[str] = set()
+    for loop in ast.walk(func):
+        if isinstance(loop, (ast.For, ast.While)):
+            for node in ast.walk(loop):
+                if isinstance(node, ast.AugAssign) and isinstance(node.target, ast.Name):
+                    names.add(node.target.id)
+                elif isinstance(node, ast.Assign):
+                    for t in node.targets:
+                        if isinstance(t, ast.Name):
+                            names.add(t.id)
+    return names
+
+
+def _for_target_names(func: ast.AST) -> set[str]:
+    """Loop-variable targets (`for right in ...` -> {right})."""
+    return {
+        node.target.id
+        for node in ast.walk(func)
+        if isinstance(node, ast.For) and isinstance(node.target, ast.Name)
+    }
+
+
 # --------------------------------------------------------------------------- #
 # Pointer-name resolution
 # --------------------------------------------------------------------------- #
@@ -222,6 +266,19 @@ def infer_pointer_vars(tree: ast.AST, array_var: str | None) -> dict:
     if array_var:
         exclude.add(array_var)
 
+    test_names = _loop_test_names(func)
+    reassigned = _reassigned_in_loop_names(func)
+    for_targets = _for_target_names(func)
+
+    def _is_pointerish(name: str) -> bool:
+        # A pointer is referenced (indexes the array OR drives a loop condition)
+        # AND moves (reassigned in a loop OR is a for-target). The "moves" clause
+        # keeps constant bounds (`n = len(arr)`) out; the loop-test clause admits
+        # binary-search bounds (`lo`/`hi`) that never index the array directly.
+        referenced = _is_used_as_index(func, name) or name in test_names
+        moves = name in reassigned or name in for_targets
+        return referenced and moves
+
     candidates: list[str] = []
     for node in ast.walk(func):
         # Pointer-initialized assignments (`left = 0`, `right = len(arr) - 1`)
@@ -238,7 +295,7 @@ def infer_pointer_vars(tree: ast.AST, array_var: str | None) -> dict:
                 isinstance(target, ast.Name)
                 and target.id not in exclude
                 and target.id not in candidates
-                and _is_used_as_index(func, target.id)
+                and _is_pointerish(target.id)
             ):
                 candidates.append(target.id)
 

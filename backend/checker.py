@@ -18,6 +18,7 @@ SEVERITY = {
     "sort_in_loop":                 "major",
     "linear_membership_check":      "minor",
     "missing_iteration_structure":  "critical",
+    "non_halving_search":           "critical",
 }
 
 # Human labels — sent to the frontend. Never show raw violation type keys to the user.
@@ -27,6 +28,7 @@ VIOLATION_LABELS = {
     "nested_loop":                 "Nested loop detected — expected single pass",
     "sort_in_loop":                "Sort inside loop — O(N² log N) total cost",
     "missing_iteration_structure": "No loop found — this code doesn't implement an iterative pattern",
+    "non_halving_search":          "Search bounds move linearly, never by the midpoint — O(N), not O(log N)",
 }
 
 # Annotation base names that make a `x in container` lookup O(1), so the
@@ -169,6 +171,77 @@ def _as_report(vtype: str, lineno: int) -> dict:
     }
 
 
+class BinarySearchChecker(SlidingWindowChecker):
+    """Everything SlidingWindowChecker flags, plus non_halving_search.
+
+    Inherited checks already cover binary search's two classic blunders:
+    ``implicit_slice_loop`` (recursive ``arr[mid+1:]`` slicing → O(N) copies per
+    level → O(N) total instead of O(log N)) and ``nested_loop``.
+
+    ``non_halving_search`` catches the subtler one: a search loop whose bounds
+    only ever move by ±1 (``lo += 1`` / ``hi -= 1``) and never jump to the
+    midpoint (``lo = mid + 1``). That is a linear scan wearing a binary-search
+    costume — O(N), not O(log N).
+    """
+
+    @staticmethod
+    def _names(node: ast.AST) -> set[str]:
+        return {n.id for n in ast.walk(node) if isinstance(n, ast.Name)}
+
+    def _check_halving(self, node: ast.While) -> None:
+        # Bound variables are the names in the loop's test (`while lo <= hi`).
+        test_vars = self._names(node.test)
+        if not test_vars:
+            return
+
+        # Midpoint variables: assigned a value that references ≥2 bounds
+        # (`(lo + hi) // 2`, `lo + (hi - lo) // 2`, `(lo + hi) >> 1`) or uses a
+        # halving operator. Robust to `//`, `/`, and `>>` bisection styles.
+        mid_vars: set[str] = set()
+        for sub in ast.walk(node):
+            if isinstance(sub, ast.Assign):
+                val_names = self._names(sub.value)
+                has_halve_op = any(
+                    isinstance(b, ast.BinOp)
+                    and isinstance(b.op, (ast.FloorDiv, ast.Div, ast.RShift))
+                    for b in ast.walk(sub.value)
+                )
+                if len(val_names & test_vars) >= 2 or has_halve_op:
+                    for t in sub.targets:
+                        if isinstance(t, ast.Name):
+                            mid_vars.add(t.id)
+
+        # Inspect every update to a bound: does it jump to the midpoint (halving)
+        # or just nudge by a constant (linear)? Any halving update clears the
+        # flag — we only report a search that is linear with NO halving at all.
+        halving = False
+        linear = False
+        for sub in ast.walk(node):
+            if isinstance(sub, ast.AugAssign) and isinstance(sub.target, ast.Name) and sub.target.id in test_vars:
+                if self._names(sub.value) & mid_vars:
+                    halving = True
+                else:
+                    linear = True
+            elif isinstance(sub, ast.Assign):
+                val_names = self._names(sub.value)
+                for t in sub.targets:
+                    if isinstance(t, ast.Name) and t.id in test_vars:
+                        if val_names & mid_vars:
+                            halving = True
+                        else:
+                            linear = True
+
+        if linear and not halving:
+            self.violations.append({"type": "non_halving_search", "lineno": node.lineno})
+
+    def visit_While(self, node: ast.While) -> None:
+        # Only the outer search loop is analysed for halving; a nested loop is
+        # already reported as nested_loop by the inherited visitor.
+        if self._loop_depth == 0:
+            self._check_halving(node)
+        super().visit_While(node)
+
+
 def check_contract(source: str, pattern: str) -> list[dict]:
     """Public entry point: parse ``source`` and run the checker for ``pattern``.
 
@@ -177,9 +250,10 @@ def check_contract(source: str, pattern: str) -> list[dict]:
     """
     tree = ast.parse(source)
 
-    if pattern not in ("sliding_window", "two_pointers"):
+    if pattern not in ("sliding_window", "two_pointers", "binary_search"):
         raise ValueError(
-            f"Unknown pattern {pattern!r}. Expected 'sliding_window' or 'two_pointers'."
+            f"Unknown pattern {pattern!r}. Expected 'sliding_window', "
+            "'two_pointers', or 'binary_search'."
         )
 
     # Pattern-presence guard (runs first): with zero loops, no other check can
@@ -195,6 +269,8 @@ def check_contract(source: str, pattern: str) -> list[dict]:
 
     if pattern == "sliding_window":
         checker: SlidingWindowChecker = SlidingWindowChecker()
+    elif pattern == "binary_search":
+        checker = BinarySearchChecker()
     else:  # two_pointers
         list_args = [
             name

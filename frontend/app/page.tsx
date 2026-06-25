@@ -16,7 +16,7 @@ import {
   type Socratic,
 } from "./lib/grading-stream";
 
-type PatternKey = "sliding_window" | "two_pointers";
+type PatternKey = "sliding_window" | "two_pointers" | "binary_search";
 
 interface PatternMeta {
   key: PatternKey;
@@ -63,11 +63,30 @@ const PATTERNS: PatternMeta[] = [
     return []
 `,
   },
+  {
+    key: "binary_search",
+    label: "Binary Search",
+    hint: "Use when: searching a sorted array in O(log N)",
+    template: `def solve(arr, target):
+    lo = 0
+    hi = len(arr) - 1
+    while lo <= hi:
+        mid = (lo + hi) // 2
+        if arr[mid] == target:
+            return mid
+        elif arr[mid] < target:
+            lo = mid + 1
+        else:
+            hi = mid - 1
+    return -1
+`,
+  },
 ];
 
 const TEMPLATE: Record<PatternKey, string> = {
   sliding_window: PATTERNS[0].template,
   two_pointers: PATTERNS[1].template,
+  binary_search: PATTERNS[2].template,
 };
 
 // Banner copy + colour per backend code (plus "clean" success and a "network"
