@@ -1,0 +1,14 @@
+<svg width="256" height="256" viewBox="0 0 256 256" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="AlgoLens">
+  <!-- AlgoLens favicon: a lens inspecting an array. Accent #C97832, secondary #4A90E2 on near-black. -->
+  <rect width="256" height="256" rx="56" fill="#0A0A0A"/>
+  <!-- lens interior -->
+  <circle cx="150" cy="106" r="50" fill="#050505"/>
+  <!-- array bars under inspection -->
+  <rect x="128" y="118" width="13" height="16" rx="3" fill="#4A90E2"/>
+  <rect x="146" y="100" width="13" height="34" rx="3" fill="#4A90E2"/>
+  <rect x="164" y="86" width="13" height="48" rx="3" fill="#4A90E2"/>
+  <!-- lens ring -->
+  <circle cx="150" cy="106" r="51" stroke="#C97832" stroke-width="22" fill="none"/>
+  <!-- handle -->
+  <line x1="190" y1="146" x2="226" y2="182" stroke="#C97832" stroke-width="26" stroke-linecap="round"/>
+</svg>
